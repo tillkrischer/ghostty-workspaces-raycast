@@ -1,0 +1,39 @@
+{
+  "name": "ghostty-workspaces",
+  "version": "0.1.0",
+  "private": true,
+  "title": "Ghostty Workspaces",
+  "description": "Switch to open Ghostty workspaces or create new ones from zoxide.",
+  "icon": "icon.png",
+  "author": "tillkrischer",
+  "license": "MIT",
+  "platforms": [
+    "macOS"
+  ],
+  "categories": [
+    "Developer Tools"
+  ],
+  "commands": [
+    {
+      "name": "index",
+      "title": "Ghostty Workspaces",
+      "description": "Switch to open Ghostty workspaces or create a new Ghostty window from zoxide.",
+      "mode": "view"
+    }
+  ],
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "lint": "ray lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@raycast/api": "^1.104.10",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/react": "^19.0.10",
+    "typescript": "^5.8.2"
+  }
+}
