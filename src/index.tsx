@@ -1,5 +1,5 @@
 import { Action, ActionPanel, Icon, List, Toast, closeMainWindow, showToast } from "@raycast/api";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { access } from "node:fs/promises";
@@ -13,6 +13,7 @@ type OpenWorkspace = {
   id: string;
   dir: string;
   displayDir: string;
+  score: number | null;
 };
 
 type NewWorkspace = {
@@ -20,11 +21,17 @@ type NewWorkspace = {
   id: string;
   dir: string;
   displayDir: string;
+  score: number;
 };
 
 type WorkspaceData = {
   openWorkspaces: OpenWorkspace[];
   newWorkspaces: NewWorkspace[];
+};
+
+type ZoxideMatch = {
+  dir: string;
+  score: number;
 };
 
 let cachedZoxidePath: string | null = null;
@@ -47,6 +54,59 @@ function workspaceTitle(dir: string, displayDir: string) {
 
   const base = path.basename(dir);
   return base && base !== "/" ? base : displayDir;
+}
+
+function searchTerms(searchText: string) {
+  return searchText
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function matchesSearch(workspace: { dir: string; displayDir: string }, searchText: string) {
+  const terms = searchTerms(searchText).map((term) => term.toLowerCase());
+
+  if (terms.length === 0) {
+    return true;
+  }
+
+  const haystack = [workspace.dir, workspace.displayDir, workspaceTitle(workspace.dir, workspace.displayDir)]
+    .join("\n")
+    .toLowerCase();
+
+  return terms.every((term) => haystack.includes(term));
+}
+
+function compareByScore<T extends { dir: string; displayDir: string; score: number | null }>(a: T, b: T) {
+  if (a.score !== null && b.score !== null && a.score !== b.score) {
+    return b.score - a.score;
+  }
+
+  if (a.score !== null) {
+    return -1;
+  }
+
+  if (b.score !== null) {
+    return 1;
+  }
+
+  return workspaceTitle(a.dir, a.displayDir).localeCompare(workspaceTitle(b.dir, b.displayDir));
+}
+
+function parseZoxideMatch(line: string): ZoxideMatch | null {
+  const match = line.match(/^\s*([0-9]+(?:\.[0-9]+)?)\s+(.+)$/);
+  if (!match) {
+    return null;
+  }
+
+  const score = Number(match[1]);
+  const dir = match[2]?.trim();
+
+  if (!dir || Number.isNaN(score)) {
+    return null;
+  }
+
+  return { dir, score };
 }
 
 async function runAppleScript(script: string, args: string[] = []) {
@@ -195,48 +255,74 @@ return outputLines as text
         }
 
         seen.add(dir);
-        return {
+        const workspace: OpenWorkspace = {
           kind: "open" as const,
           id: windowId,
           dir,
           displayDir: displayPath(dir),
+          score: null,
         };
+
+        return workspace;
       }),
   );
 
   return entries.filter((entry): entry is OpenWorkspace => entry !== null);
 }
 
-async function getZoxideDirs() {
+async function queryZoxide(searchText: string) {
   const zoxidePath = await resolveZoxidePath();
-  const result = await execFileAsync(zoxidePath, ["query", "-l"]);
+  const result = await execFileAsync(zoxidePath, ["query", "-l", "-s", ...searchTerms(searchText)]);
+
   return result.stdout
     .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+    .map((line) => parseZoxideMatch(line.trimEnd()))
+    .filter((entry): entry is ZoxideMatch => entry !== null);
 }
 
-async function loadWorkspaceData(): Promise<WorkspaceData> {
-  const openWorkspaces = await getOpenWorkspaces();
-  const openDirs = new Set(openWorkspaces.map((workspace) => workspace.dir));
-  const zoxideDirs = await getZoxideDirs();
-  const newWorkspaces: NewWorkspace[] = [];
-  const seenDirs = new Set(openDirs);
+async function addToZoxide(dir: string) {
+  const zoxidePath = await resolveZoxidePath();
+  await execFileAsync(zoxidePath, ["add", dir]);
+}
 
-  for (const dir of zoxideDirs) {
-    const resolvedDir = await canonicalDir(dir);
+async function loadWorkspaceData(searchText: string): Promise<WorkspaceData> {
+  const [openWorkspaceEntries, zoxideMatches] = await Promise.all([getOpenWorkspaces(), queryZoxide(searchText)]);
+  const openDirs = new Set(openWorkspaceEntries.map((workspace) => workspace.dir));
+  const newWorkspaces: NewWorkspace[] = [];
+  const scoreByDir = new Map<string, number>();
+  const seenDirs = new Set<string>();
+
+  for (const match of zoxideMatches) {
+    const resolvedDir = await canonicalDir(match.dir);
     if (!(await pathExists(resolvedDir)) || seenDirs.has(resolvedDir)) {
       continue;
     }
 
     seenDirs.add(resolvedDir);
+    scoreByDir.set(resolvedDir, match.score);
+
+    if (openDirs.has(resolvedDir)) {
+      continue;
+    }
+
     newWorkspaces.push({
       kind: "new",
       id: resolvedDir,
       dir: resolvedDir,
       displayDir: displayPath(resolvedDir),
+      score: match.score,
     });
   }
+
+  const openWorkspaces = openWorkspaceEntries
+    .filter((workspace) => matchesSearch(workspace, searchText) || scoreByDir.has(workspace.dir))
+    .map<OpenWorkspace>((workspace) => ({
+      ...workspace,
+      score: scoreByDir.get(workspace.dir) ?? null,
+    }))
+    .sort(compareByScore);
+
+  newWorkspaces.sort(compareByScore);
 
   return {
     openWorkspaces,
@@ -302,6 +388,14 @@ async function revealInFinder(dir: string) {
   await execFileAsync("open", [dir]);
 }
 
+function scoreAccessory(score: number | null) {
+  if (score === null) {
+    return [];
+  }
+
+  return [{ text: score.toFixed(1), tooltip: "zoxide score" }];
+}
+
 async function runAction(title: string, action: () => Promise<void>) {
   try {
     await action();
@@ -327,12 +421,26 @@ async function runWorkspaceAction(title: string, action: () => Promise<void>, re
 export default function Command() {
   const [data, setData] = useState<WorkspaceData>({ openWorkspaces: [], newWorkspaces: [] });
   const [isLoading, setIsLoading] = useState(true);
+  const [searchText, setSearchText] = useState("");
+  const requestIdRef = useRef(0);
 
   const reload = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+
     try {
       setIsLoading(true);
-      setData(await loadWorkspaceData());
+      const nextData = await loadWorkspaceData(searchText);
+
+      if (requestId !== requestIdRef.current) {
+        return;
+      }
+
+      setData(nextData);
     } catch (error) {
+      if (requestId !== requestIdRef.current) {
+        return;
+      }
+
       const message = errorMessage(error);
       console.error(`[ghostty-workspaces] Failed to load workspaces: ${message}`, error);
       await showToast({
@@ -341,9 +449,11 @@ export default function Command() {
         message,
       });
     } finally {
-      setIsLoading(false);
+      if (requestId === requestIdRef.current) {
+        setIsLoading(false);
+      }
     }
-  }, []);
+  }, [searchText]);
 
   useEffect(() => {
     reload();
@@ -352,7 +462,12 @@ export default function Command() {
   const hasItems = useMemo(() => data.openWorkspaces.length > 0 || data.newWorkspaces.length > 0, [data]);
 
   return (
-    <List isLoading={isLoading} searchBarPlaceholder="Search Ghostty workspaces">
+    <List
+      isLoading={isLoading}
+      throttle
+      searchBarPlaceholder="Search Ghostty workspaces with zoxide"
+      onSearchTextChange={setSearchText}
+    >
       {!isLoading && !hasItems ? (
         <List.EmptyView title="No workspaces found" description="No open Ghostty windows and no zoxide directories available." />
       ) : null}
@@ -365,6 +480,7 @@ export default function Command() {
             title={workspaceTitle(workspace.dir, workspace.displayDir)}
             subtitle={workspace.displayDir}
             keywords={[workspace.dir, workspace.displayDir]}
+            accessories={scoreAccessory(workspace.score)}
             actions={
               <ActionPanel>
                 <Action
@@ -375,6 +491,7 @@ export default function Command() {
                       async () => {
                         await setWorkspaceTitle(workspace.id, workspaceTitle(workspace.dir, workspace.displayDir));
                         await activateWorkspace(workspace.id);
+                        await addToZoxide(workspace.dir);
                       },
                       reload,
                     )
@@ -402,6 +519,7 @@ export default function Command() {
             title={workspaceTitle(workspace.dir, workspace.displayDir)}
             subtitle={workspace.displayDir}
             keywords={[workspace.dir, workspace.displayDir]}
+            accessories={scoreAccessory(workspace.score)}
             actions={
               <ActionPanel>
                 <Action
@@ -409,7 +527,10 @@ export default function Command() {
                   onAction={() =>
                     runWorkspaceAction(
                       "Failed to open workspace",
-                      () => openWorkspace(workspace.dir, workspaceTitle(workspace.dir, workspace.displayDir)),
+                      async () => {
+                        await openWorkspace(workspace.dir, workspaceTitle(workspace.dir, workspace.displayDir));
+                        await addToZoxide(workspace.dir);
+                      },
                       reload,
                     )
                   }
