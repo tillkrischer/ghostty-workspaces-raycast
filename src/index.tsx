@@ -21,7 +21,8 @@ type NewWorkspace = {
   id: string;
   dir: string;
   displayDir: string;
-  score: number;
+  score: number | null;
+  isHome: boolean;
 };
 
 type WorkspaceData = {
@@ -91,6 +92,14 @@ function compareByScore<T extends { dir: string; displayDir: string; score: numb
   }
 
   return workspaceTitle(a.dir, a.displayDir).localeCompare(workspaceTitle(b.dir, b.displayDir));
+}
+
+function compareNewWorkspaces(a: NewWorkspace, b: NewWorkspace) {
+  if (a.isHome !== b.isHome) {
+    return a.isHome ? -1 : 1;
+  }
+
+  return compareByScore(a, b);
 }
 
 function parseZoxideMatch(line: string): ZoxideMatch | null {
@@ -291,6 +300,23 @@ async function loadWorkspaceData(searchText: string): Promise<WorkspaceData> {
   const newWorkspaces: NewWorkspace[] = [];
   const scoreByDir = new Map<string, number>();
   const seenDirs = new Set<string>();
+  const homeDir = process.env.HOME ? await canonicalDir(process.env.HOME) : null;
+
+  if (homeDir && (await pathExists(homeDir)) && !openDirs.has(homeDir)) {
+    const homeWorkspace = {
+      kind: "new" as const,
+      id: homeDir,
+      dir: homeDir,
+      displayDir: displayPath(homeDir),
+      score: null,
+      isHome: true,
+    };
+
+    if (matchesSearch(homeWorkspace, searchText)) {
+      newWorkspaces.push(homeWorkspace);
+      seenDirs.add(homeDir);
+    }
+  }
 
   for (const match of zoxideMatches) {
     const resolvedDir = await canonicalDir(match.dir);
@@ -311,6 +337,7 @@ async function loadWorkspaceData(searchText: string): Promise<WorkspaceData> {
       dir: resolvedDir,
       displayDir: displayPath(resolvedDir),
       score: match.score,
+      isHome: false,
     });
   }
 
@@ -322,7 +349,7 @@ async function loadWorkspaceData(searchText: string): Promise<WorkspaceData> {
     }))
     .sort(compareByScore);
 
-  newWorkspaces.sort(compareByScore);
+  newWorkspaces.sort(compareNewWorkspaces);
 
   return {
     openWorkspaces,
