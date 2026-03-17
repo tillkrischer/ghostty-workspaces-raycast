@@ -1,5 +1,6 @@
-import { Action, ActionPanel, Icon, List, Toast, closeMainWindow, showToast } from "@raycast/api";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Action, ActionPanel, Icon, List, PopToRootType, Toast, closeMainWindow, showToast } from "@raycast/api";
+import { useCachedPromise } from "@raycast/utils";
+import { useCallback, useMemo, useState } from "react";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { access } from "node:fs/promises";
@@ -441,33 +442,18 @@ async function runWorkspaceAction(title: string, action: () => Promise<void>, re
   await runAction(title, async () => {
     await action();
     await reload();
-    await closeMainWindow();
+    await closeMainWindow({ clearRootSearch: true, popToRootType: PopToRootType.Immediate });
   });
 }
 
 export default function Command() {
-  const [data, setData] = useState<WorkspaceData>({ openWorkspaces: [], newWorkspaces: [] });
-  const [isLoading, setIsLoading] = useState(true);
+  const initialData = useMemo<WorkspaceData>(() => ({ openWorkspaces: [], newWorkspaces: [] }), []);
   const [searchText, setSearchText] = useState("");
-  const requestIdRef = useRef(0);
 
-  const reload = useCallback(async () => {
-    const requestId = ++requestIdRef.current;
-
-    try {
-      setIsLoading(true);
-      const nextData = await loadWorkspaceData(searchText);
-
-      if (requestId !== requestIdRef.current) {
-        return;
-      }
-
-      setData(nextData);
-    } catch (error) {
-      if (requestId !== requestIdRef.current) {
-        return;
-      }
-
+  const { data, isLoading, mutate } = useCachedPromise(loadWorkspaceData, [searchText], {
+    initialData,
+    keepPreviousData: true,
+    onError: async (error) => {
       const message = errorMessage(error);
       console.error(`[ghostty-workspaces] Failed to load workspaces: ${message}`, error);
       await showToast({
@@ -475,16 +461,12 @@ export default function Command() {
         title: "Failed to load workspaces",
         message,
       });
-    } finally {
-      if (requestId === requestIdRef.current) {
-        setIsLoading(false);
-      }
-    }
-  }, [searchText]);
+    },
+  });
 
-  useEffect(() => {
-    reload();
-  }, [reload]);
+  const reload = useCallback(async () => {
+    await mutate(loadWorkspaceData(searchText), { shouldRevalidateAfter: false });
+  }, [mutate, searchText]);
 
   const hasItems = useMemo(() => data.openWorkspaces.length > 0 || data.newWorkspaces.length > 0, [data]);
 
